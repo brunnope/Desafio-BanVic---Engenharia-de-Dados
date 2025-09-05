@@ -1,0 +1,212 @@
+# CONFIGURAÇÕES COMPARTILHADAS DO AIRFLOW
+
+x-airflow-common:
+  &airflow-common
+  build: .
+  image: custom-airflow:2.7.1
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.session'
+  volumes:
+    - ./dags:/opt/airflow/dags                    
+    - ./scripts:/opt/airflow/scripts             
+    - ./data:/opt/airflow/data                    
+    - ./logs:/opt/airflow/logs                    
+    - ./plugins:/opt/airflow/plugins              
+    - ./extracted_data:/opt/airflow/extracted_data  
+  networks:
+    - banvic-network
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    airflow-db:
+      condition: service_healthy
+
+services:
+
+  # BANCO FONTE - DADOS ORIGINAIS (FORNECIDO)
+
+  db-fonte:
+    image: postgres:16
+    container_name: banvic-fonte
+    environment:
+      POSTGRES_DB: banvic
+      POSTGRES_USER: data_engineer
+      POSTGRES_PASSWORD: v3rysecur&pas5w0rd
+    volumes:
+      - ./banvic.sql:/docker-entrypoint-initdb.d/banvic.sql  # Popula dados iniciais
+      - fonte-data:/var/lib/postgresql/data                   # Persiste dados
+    ports:
+      - "55432:5432" 
+    networks:
+      - banvic-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "data_engineer", "-d", "banvic"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # DATA WAREHOUSE - DESTINO FINAL
+
+  data-warehouse:
+    image: postgres:16
+    container_name: banvic-dw
+    environment:
+      POSTGRES_DB: dw_banvic
+      POSTGRES_USER: data_engineer
+      POSTGRES_PASSWORD: v3rysecur&pas5w0rd
+    volumes:
+      - dw-data:/var/lib/postgresql/data  # Persiste dados do DW
+    ports:
+      - "55433:5432"
+    networks:
+      - banvic-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "data_engineer", "-d", "dw_banvic"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+
+  # BANCO DO AIRFLOW (METADADOS)
+  airflow-db:
+    image: postgres:13
+    container_name: airflow-metadata
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-volume:/var/lib/postgresql/data
+    networks:
+      - banvic-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+
+  # AIRFLOW - WEBSERVER (INTERFACE)
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080" 
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+ 
+  # AIRFLOW - SCHEDULER (ORQUESTRADOR)
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+
+  # AIRFLOW - INICIALIZAÇÃO
+
+ # AIRFLOW - INICIALIZAÇÃO
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        # Função para comparar versões
+        function ver() {
+          printf "%04d%04d%04d%04d" $${1//./ }
+        }
+        
+        # Verificar versão mínima do Airflow
+        airflow_version=$$(AIRFLOW__LOGGING__LOGGING_LEVEL=INFO && gosu airflow airflow version)
+        airflow_version_comparable=$$(ver $${airflow_version})
+        min_airflow_version=2.2.0
+        min_airflow_version_comparable=$$(ver $${min_airflow_version})
+        
+        if (( airflow_version_comparable < min_airflow_version_comparable )); then
+          echo "ERRO: Versão do Airflow muito antiga ($${airflow_version})"
+          echo "Versão mínima suportada: $${min_airflow_version}"
+          exit 1
+        fi
+        
+        # Criar diretórios necessários
+        mkdir -p /sources/{logs,dags,plugins,scripts,data}
+        mkdir -p /opt/airflow/extracted_data
+
+        # Ajustar permissões - CORREÇÃO AQUI
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins,data}
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/extracted_data
+        chmod -R 775 /opt/airflow/extracted_data
+        
+        echo "Inicialização do Airflow concluída"
+        echo "Projeto BanVic - Data Pipeline"
+        echo "Interface: http://localhost:8080 (admin/admin)"
+        echo "DW: localhost:55433 (data_engineer/v3rysecur&pas5w0rd)"
+        echo "Fonte: localhost:55432 (data_engineer/v3rysecur&pas5w0rd)"
+        
+        # Executar inicialização padrão do Airflow
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'       
+      _AIRFLOW_WWW_USER_CREATE: 'true'  
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+    user: "0:0"
+    volumes:
+      - .:/sources
+
+
+# REDES E VOLUMES
+
+networks:
+  banvic-network:
+    name: banvic-network
+    driver: bridge
+
+volumes:
+  # Dados do banco fonte
+  fonte-data:
+    name: banvic-fonte-data
+  
+  # Dados do Data Warehouse
+  dw-data:
+    name: banvic-dw-data
+  
+  # Metadados do Airflow
+  airflow-db-volume:
+    name: airflow-metadata
+  
+  # CSVs extraídos (compartilhado entre serviços)
+  extracted_data:
+    name: banvic-extracted-data
