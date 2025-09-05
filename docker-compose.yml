@@ -74,6 +74,7 @@ services:
 
 
   # BANCO DO AIRFLOW (METADADOS)
+  
   airflow-db:
     image: postgres:13
     container_name: airflow-metadata
@@ -134,7 +135,6 @@ services:
 
   # AIRFLOW - INICIALIZAÇÃO
 
- # AIRFLOW - INICIALIZAÇÃO
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
