@@ -29,7 +29,7 @@ git clone https://github.com/brunnope/Desafio-BanVic---Engenharia-de-Dados.git
 cd desafio-banvic
 
 # Suba os serviços (Airflow, banco fonte, DW)
-docker-compose up
+docker-compose up -d --build
 
 # Inicialize o Airflow por comando ou via web
 docker-compose up airflow-init
